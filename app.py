@@ -1,229 +1,220 @@
-"""
-Frazer School Chess Leaderboard
---------------------------------
-
-Features:
-- Automatic medal emojis for top 3
-- Collapsible scoring explanation
-- Example scoring table
-- FAQ section
-- Top 10 scoring system
-"""
-
 import streamlit as st
 import requests
 import pandas as pd
+import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, date
+import calendar
+from pathlib import Path
 
-st.set_page_config(page_title="Frazer Chess Leaderboard", layout="wide")
+# -------------------------------------------------------
+# PAGE CONFIG
+# -------------------------------------------------------
+st.set_page_config(
+    page_title="Frazer Chess Leaderboard",
+    layout="wide"
+)
 
-st.title("🏆 Frazer School Chess Leaderboard")
+# -------------------------------------------------------
+# HEADER WITH FALCON LOGO
+# -------------------------------------------------------
+col1, col2 = st.columns([1, 5])
+
+with col1:
+    logo_path = Path(__file__).parent / "assets" / "falcon.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=120)
+
+with col2:
+    st.markdown(
+        "<h1 style='margin-top:30px;'>🏆 Frazer School Chess Leaderboard</h1>",
+        unsafe_allow_html=True
+    )
 
 TEAM_ID = "frazer-school-chess-team"
 headers = {"Accept": "application/x-ndjson"}
 
-# -----------------------------------
-# Date Selection
-# -----------------------------------
+# -------------------------------------------------------
+# FLEXIBLE DATE SELECTION
+# -------------------------------------------------------
+today = date.today()
+
 col1, col2 = st.columns(2)
 with col1:
-    start_date = st.date_input("Start Date")
+    start_date = st.date_input("Start Date", value=date(today.year, today.month, 1))
 with col2:
-    end_date = st.date_input("End Date")
+    end_date = st.date_input("End Date", value=today)
 
+if start_date > end_date:
+    st.error("Start date must be before end date.")
+    st.stop()
 
-# -----------------------------------
-# Fetch Team Tournaments
-# -----------------------------------
-@st.cache_data(show_spinner=False)
+# -------------------------------------------------------
+# FETCH TOURNAMENTS
+# -------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_team_tournaments():
     tournaments = []
 
     # Arena tournaments
     arena_url = f"https://lichess.org/api/team/{TEAM_ID}/arena"
-    r = requests.get(arena_url, headers=headers, stream=True)
+    r = requests.get(arena_url, headers=headers, stream=True, timeout=30)
     if r.status_code == 200:
         for line in r.iter_lines():
             if line:
-                data = pd.read_json(line.decode("utf-8"), typ="series")
+                data = json.loads(line.decode("utf-8"))
                 tournaments.append({
                     "id": data["id"],
                     "date": datetime.utcfromtimestamp(
                         data["startsAt"] / 1000
                     ).date(),
-                    "type": "arena"
+                    "type": "arena",
+                    "name": data.get("fullName", data.get("name", "")).lower()
                 })
 
     # Swiss tournaments
     swiss_url = f"https://lichess.org/api/team/{TEAM_ID}/swiss"
-    r = requests.get(swiss_url, headers=headers, stream=True)
+    r = requests.get(swiss_url, headers=headers, stream=True, timeout=30)
     if r.status_code == 200:
         for line in r.iter_lines():
             if line:
-                data = pd.read_json(line.decode("utf-8"), typ="series")
+                data = json.loads(line.decode("utf-8"))
                 tournaments.append({
                     "id": data["id"],
                     "date": datetime.fromisoformat(
                         data["startsAt"].replace("Z", "+00:00")
                     ).date(),
-                    "type": "swiss"
+                    "type": "swiss",
+                    "name": data.get("name", "").lower()
                 })
 
     return tournaments
 
 
-# -----------------------------------
-# Fetch Results
-# -----------------------------------
-@st.cache_data(show_spinner=False)
-def fetch_results(tournament_id, tournament_type):
-
-    if tournament_type == "arena":
-        url = f"https://lichess.org/api/tournament/{tournament_id}/results"
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_results(tid, ttype):
+    if ttype == "arena":
+        url = f"https://lichess.org/api/tournament/{tid}/results"
     else:
-        url = f"https://lichess.org/api/swiss/{tournament_id}/results"
+        url = f"https://lichess.org/api/swiss/{tid}/results"
 
-    r = requests.get(url, headers=headers, stream=True)
+    r = requests.get(url, headers=headers, stream=True, timeout=30)
     results = []
 
     if r.status_code == 200:
         for line in r.iter_lines():
             if line:
-                data = pd.read_json(line.decode("utf-8"), typ="series")
-                results.append(data)
+                results.append(json.loads(line.decode("utf-8")))
 
     return results
 
 
-# -----------------------------------
-# Main Logic
-# -----------------------------------
-if start_date and end_date:
+def build_dataframe(score_dict):
+    leaderboard_data = []
 
-    if start_date > end_date:
-        st.error("Start date must be before end date.")
-        st.stop()
+    for user, scores in score_dict.items():
+        sorted_scores = sorted(scores, reverse=True)
+        top10 = sorted_scores[:10]
 
-    with st.spinner("Fetching tournament data..."):
-        tournaments = fetch_team_tournaments()
-
-        filtered = [
-            t for t in tournaments
-            if start_date <= t["date"] <= end_date
-        ]
-
-        if not filtered:
-            st.warning("No tournaments found in selected date range.")
-            st.stop()
-
-        user_scores = defaultdict(list)
-
-        for t in filtered:
-            results = fetch_results(t["id"], t["type"])
-            total_players = len(results)
-
-            for player in results:
-                username = player["username"]
-                rank = player["rank"]
-                score = total_players - rank + 1
-                user_scores[username].append(score)
-
-        leaderboard_data = []
-
-        for user, scores in user_scores.items():
-            sorted_scores = sorted(scores, reverse=True)
-            top10 = sorted_scores[:10]
-
-            leaderboard_data.append({
-                "Username": user,
-                "GamesPlayed": len(scores),
-                "Top10TotalScore": sum(top10)
-            })
-
-        df = pd.DataFrame(leaderboard_data)
-        df = df.sort_values("Top10TotalScore", ascending=False)
-        df = df.reset_index(drop=True)
-
-        # Add Rank column
-        df.insert(0, "Rank", df.index + 1)
-
-        # Add medal emojis
-        def add_medal(rank):
-            if rank == 1:
-                return "🥇"
-            elif rank == 2:
-                return "🥈"
-            elif rank == 3:
-                return "🥉"
-            else:
-                return ""
-
-        df["Medal"] = df["Rank"].apply(add_medal)
-
-        # Move Medal next to Rank
-        df = df[["Rank", "Medal", "Username", "GamesPlayed", "Top10TotalScore"]]
-
-    # -----------------------------------
-    # Collapsible Explanation Section
-    # -----------------------------------
-    with st.expander("📊 How Top 10 Score Is Calculated"):
-
-        st.markdown("""
-        **Scoring Formula**
-
-        ```
-        Score = Total Players − Rank + 1
-        ```
-
-        Larger tournaments give more possible points.
-        """)
-
-        st.markdown("### Example (12 Player Tournament)")
-
-        example_df = pd.DataFrame({
-            "Rank": [1, 2, 3, 12],
-            "Score": [12, 11, 10, 1]
+        leaderboard_data.append({
+            "Username": user,
+            "GamesPlayed": len(scores),
+            "Top10TotalScore": sum(top10)
         })
 
-        st.table(example_df)
+    if not leaderboard_data:
+        return pd.DataFrame(columns=["Rank", "Medal", "Username", "GamesPlayed", "Top10TotalScore"])
 
-        st.markdown("""
-        **Top 10 Rule**
-        - Each player's 10 highest scoring tournaments are counted.
-        - If a player plays fewer than 10 tournaments,
-          all tournaments are counted.
-        - Leaderboard is ranked by highest Top 10 total score.
-        """)
+    df = pd.DataFrame(leaderboard_data)
+    df = df.sort_values("Top10TotalScore", ascending=False).reset_index(drop=True)
+    df.insert(0, "Rank", df.index + 1)
 
-    # -----------------------------------
-    # Leaderboard Display
-    # -----------------------------------
-    st.subheader("🏅 Leaderboard")
-    st.dataframe(df, hide_index=True)
-
-    st.download_button(
-        "Download Leaderboard CSV",
-        df.to_csv(index=False),
-        "frazer_leaderboard.csv"
+    df["Medal"] = df["Rank"].apply(
+        lambda r: "🥇" if r == 1 else
+                  "🥈" if r == 2 else
+                  "🥉" if r == 3 else ""
     )
 
-    # -----------------------------------
-    # FAQ Section
-    # -----------------------------------
-    st.markdown("---")
-    st.markdown("### ❓ FAQ")
+    return df[["Rank", "Medal", "Username", "GamesPlayed", "Top10TotalScore"]]
 
+
+# -------------------------------------------------------
+# BUILD LEADERBOARD
+# -------------------------------------------------------
+with st.spinner("Fetching data..."):
+    tournaments = fetch_team_tournaments()
+
+    filtered = [
+        t for t in tournaments
+        if start_date <= t["date"] <= end_date
+    ]
+
+    if not filtered:
+        st.warning("No tournaments found in this date range.")
+        st.stop()
+
+    overall_scores = defaultdict(list)
+
+    for t in filtered:
+        results = fetch_results(t["id"], t["type"])
+        total_players = len(results)
+
+        for player in results:
+            username = player["username"]
+            rank = player["rank"]
+            score = total_players - rank + 1
+            overall_scores[username].append(score)
+
+    df = build_dataframe(overall_scores)
+
+# -------------------------------------------------------
+# SCORING EXPLANATION
+# -------------------------------------------------------
+with st.expander("📊 How Scoring Works"):
     st.markdown("""
-    **Q1: Why does winning a bigger tournament give more points?**  
-    Larger tournaments are more competitive, so first place is rewarded more.
+Score = Total Players − Rank + 1
 
-    **Q2: What if a player misses tournaments?**  
-    Only tournaments they played are counted.
+Example with 12 players:
+- 1st place = 12 points
+- 2nd place = 11 points
+- 3rd place = 10 points
+- 12th place = 1 point
 
-    **Q3: Why Top 10 only?**  
-    This rewards consistency and avoids penalizing students who cannot attend every week.
+For each player, we count their 10 highest scoring tournaments in the selected date range.
+If they played fewer than 10 tournaments, all of their tournaments are counted.
+""")
 
-    **Q4: Can rankings change later?**  
-    Yes. Rankings update automatically when new tournaments are included in the selected date range.
-    """)
+    example_df = pd.DataFrame({
+        "Rank": [1, 2, 3, 12],
+        "Score": [12, 11, 10, 1]
+    })
+    st.table(example_df)
+
+# -------------------------------------------------------
+# LEADERBOARD DISPLAY
+# -------------------------------------------------------
+st.subheader("🏅 Leaderboard")
+st.dataframe(df, hide_index=True)
+
+st.download_button(
+    label="Download Leaderboard as CSV",
+    data=df.to_csv(index=False),
+    file_name="frazer_leaderboard.csv",
+    mime="text/csv"
+)
+
+# -------------------------------------------------------
+# FAQ
+# -------------------------------------------------------
+st.markdown("---")
+st.markdown("### ❓ FAQ")
+st.markdown("""
+Why do larger tournaments give more points?  
+Because beating more players is more competitive.
+
+What if a student misses tournaments?  
+Only tournaments they played are counted.
+
+Does the leaderboard update automatically?  
+Yes. It pulls data directly from Lichess.
+""")
